@@ -2,6 +2,11 @@ project:
   title: "presentation"
   output-dir: "_output"
 
+## Julia support
+engine: julia
+julia:
+  exeflags: ["--project=../project"]
+  
 standalone: true
 self-contained: true
 slide-level: 2
