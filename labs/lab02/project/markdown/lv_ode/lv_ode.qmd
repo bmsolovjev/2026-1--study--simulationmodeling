@@ -1,0 +1,188 @@
+## МОДЕЛЬ ЛОТКИ-ВОЛЬТЕРРЫ (ХИЩНИК-ЖЕРТВА)
+
+```{julia}
+using DrWatson
+quickactivate(dirname(@__DIR__), "project")
+
+using DifferentialEquations
+using DataFrames
+using StatsPlots
+using LaTeXStrings
+using Plots
+using Statistics
+using FFTW
+using LinearAlgebra
+using CSV
+
+script_name = "lv_ode"
+mkpath(plotsdir(script_name))
+mkpath(datadir(script_name))
+
+"""
+Модель Лотки-Вольтерры (хищник-жертва)
+
+Данная модель описывает динамику взаимодействия двух видов:
+  - Жертвы (x) — популяция, служащая пищей для хищников
+  - Хищники (y) — популяция, питающаяся жертвами
+
+Система дифференциальных уравнений:
+  dx/dt = α·x - β·x·y    (1)  — рост жертв ограничен хищниками
+  dy/dt = δ·x·y - γ·y    (2)  — рост хищников зависит от наличия жертв
+"""
+function lotka_volterra!(du, u, p, t)
+    x, y = u
+    α, β, δ, γ = p
+    @inbounds begin
+        du[1] = α*x - β*x*y
+        du[2] = δ*x*y - γ*y
+    end
+    nothing
+end
+
+"""
+Анализ стационарных точек модели Лотки-Вольтерры
+"""
+function analyze_fixed_points(p)
+    α, β, δ, γ = p
+    x_star = γ / δ
+    y_star = α / β
+    ω = sqrt(α * γ)
+    T = 2π / ω
+    J = [0  -β*x_star; δ*y_star  0]
+    eigenvalues = eigvals(J)
+    return (;
+        x_star = x_star,
+        y_star = y_star,
+        frequency = ω,
+        period = T,
+        eigenvalues = eigenvalues,
+        is_stable = all(real(eigenvalues) .<= 0)
+    )
+end
+
+"""
+Наборы параметров модели Лотки-Вольтерры
+"""
+parameter_sets = [
+    [0.1, 0.02, 0.01, 0.3],    # Набор 1: Классический
+    [0.2, 0.02, 0.01, 0.3],    # Набор 2: Быстрый рост жертв
+    [0.05, 0.02, 0.01, 0.3],   # Набор 3: Медленный рост жертв
+    [0.1, 0.04, 0.02, 0.3],    # Набор 4: Высокая эффективность хищников
+    [0.1, 0.01, 0.005, 0.15]   # Набор 5: Сбалансированный
+]
+
+parameter_names = [
+    "Классический",
+    "Быстрый рост жертв",
+    "Медленный рост жертв",
+    "Высокая эффективность хищников",
+    "Сбалансированный"
+]
+
+u0_lv = [40.0, 9.0]
+tspan_lv = (0.0, 200.0)
+dt_lv = 0.01
+
+"""
+    solve_lotka_volterra(p, u0, tspan; kwargs...)
+"""
+function solve_lotka_volterra(p, u0, tspan; saveat=0.1, reltol=1e-8, abstol=1e-10)
+    prob = ODEProblem(lotka_volterra!, u0, tspan, p)
+    sol = solve(prob, Tsit5(), dt=dt_lv, reltol=reltol, abstol=abstol, saveat=saveat, dense=true)
+    
+    df = DataFrame()
+    df.t = sol.t
+    df.prey = [u[1] for u in sol.u]
+    df.predator = [u[2] for u in sol.u]
+    
+    α, β, δ, γ = p
+    df.dprey_dt = α .* df.prey .- β .* df.prey .* df.predator
+    df.dpredator_dt = δ .* df.prey .* df.predator .- γ .* df.predator
+    df.prey_rel_change = df.dprey_dt ./ df.prey .* 100
+    df.predator_rel_change = df.dpredator_dt ./ df.predator .* 100
+    
+    return (sol = sol, df = df)
+end
+
+# Основной цикл вычислений (весь вывод закомментирован)
+results = []
+
+for (idx, p) in enumerate(parameter_sets)
+    α, β, δ, γ = p
+    
+    # Аналитический анализ
+    fp_analysis = analyze_fixed_points(p)
+    
+    # Численное решение
+    result = solve_lotka_volterra(p, u0_lv, tspan_lv)
+    sol, df = result.sol, result.df
+    
+    # Статистика
+    prey_stats = (min=minimum(df.prey), max=maximum(df.prey), mean=mean(df.prey))
+    pred_stats = (min=minimum(df.predator), max=maximum(df.predator), mean=mean(df.predator))
+    
+    # Спектральный анализ
+    function find_dominant_frequency(signal, dt)
+        n = length(signal)
+        spectrum = abs.(rfft(signal .- mean(signal)))
+        freq = rfftfreq(n, 1/dt)
+        idx_max = argmax(spectrum[2:end]) + 1
+        return freq[idx_max], spectrum[idx_max]
+    end
+    
+    dom_freq_prey, _ = find_dominant_frequency(df.prey, dt_lv)
+    dom_freq_pred, _ = find_dominant_frequency(df.predator, dt_lv)
+    
+    # Сохранение результатов
+    push!(results, (;
+        params = p,
+        name = parameter_names[idx],
+        fp = fp_analysis,
+        dom_freq = (prey=dom_freq_prey, predator=dom_freq_pred),
+        stats = (prey=prey_stats, pred=pred_stats)
+    ))
+    
+    # График
+    plt = plot(df.t, [df.prey df.predator],
+               label=[L"Жертвы (x)" L"Хищники (y)"],
+               xlabel="Время", ylabel="Популяция",
+               title="Лотка-Вольтерра: $(parameter_names[idx])",
+               linewidth=2, legend=:topright, size=(900, 400), fmt=:png)
+    hline!(plt, [fp_analysis.x_star], color=:green, linestyle=:dash, label="x* (теор.)")
+    hline!(plt, [fp_analysis.y_star], color=:red, linestyle=:dash, label="y* (теор.)")
+    savefig(plt, plotsdir(script_name, "lv_set$(idx)_dynamics.png"))
+end
+
+# Сравнительный анализ
+comparison_df = DataFrame(
+    Набор = 1:length(results),
+    Описание = [r.name for r in results],
+    α = [r.params[1] for r in results],
+    β = [r.params[2] for r in results],
+    δ = [r.params[3] for r in results],
+    γ = [r.params[4] for r in results],
+    x_стационар = [r.fp.x_star for r in results],
+    y_стационар = [r.fp.y_star for r in results],
+    T_теор = [r.fp.period for r in results],
+    T_эксп = [1/r.dom_freq.prey for r in results],
+    x_мин = [r.stats.prey.min for r in results],
+    x_макс = [r.stats.prey.max for r in results],
+    x_среднее = [r.stats.prey.mean for r in results],
+    y_мин = [r.stats.pred.min for r in results],
+    y_макс = [r.stats.pred.max for r in results],
+    y_среднее = [r.stats.pred.mean for r in results],
+    отклонение_T = [abs(1/r.dom_freq.prey - r.fp.period) / r.fp.period * 100 for r in results]
+)
+
+CSV.write(datadir(script_name, "comparison_results.csv"), comparison_df)
+
+# Графики сравнения
+plt_periods = bar(1:length(results), [r.fp.period for r in results],
+                  label="Теоретический период", fillalpha=0.5, fmt=:png)
+bar!(plt_periods, 1:length(results), [1/r.dom_freq.prey for r in results],
+     label="Экспериментальный период", fillalpha=0.5)
+savefig(plt_periods, plotsdir(script_name, "comparison_periods.png"))
+
+plt_fixed = scatter([r.fp.x_star for r in results], [r.fp.y_star for r in results],
+                    label="Стационарные точки", markersize=8, fmt=:png)
+savefig(plt_fixed, plotsdir(script_name, "comparison_fixed_points.png"))
