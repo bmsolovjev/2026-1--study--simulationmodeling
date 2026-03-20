@@ -1,0 +1,58 @@
+## Инициализация проекта
+Активируем проект DrWatson и загружаем необходимые пакеты
+
+```{julia}
+using DrWatson
+@quickactivate "project"
+using Agents, DataFrames, Plots, CairoMakie
+```
+
+## Загрузка модели
+Подключаем файл с определением модели daisyworld
+
+```{julia}
+include(srcdir("daisyworld.jl"))
+```
+
+## Создание и настройка модели
+Инициализируем модель и определяем цвет для отображения агентов
+
+```{julia}
+model = daisyworld()
+daisycolor(a::Daisy) = a.breed
+```
+
+## Параметры визуализации
+Настраиваем внешний графиков
+
+```{julia}
+plotkwargs = (
+    agent_color=daisycolor, agent_size=20, agent_marker='✿',
+    heatarray=:temperature, heatkwargs=(colorrange=(-20, 60),)
+)
+```
+
+## Визуализация на разных шагах
+Шаг 0: начальное состояние
+
+```{julia}
+plt1, _ = abmplot(model; plotkwargs...)
+save(plotsdir("daisy_step001.png"), plt1)
+```
+
+Шаг 5: первые изменения
+
+```{julia}
+step!(model, 5)
+plt2, _ = abmplot(model; heatarray=model.temperature, plotkwargs...)
+save(plotsdir("daisy_step005.png"), plt2)
+```
+
+Шаг 45: итоговое состояние
+
+```{julia}
+step!(model, 40)
+plt3, _ = abmplot(model; heatarray=model.temperature, plotkwargs...)
+save(plotsdir("daisy_step045.png"), plt3)
+```
+

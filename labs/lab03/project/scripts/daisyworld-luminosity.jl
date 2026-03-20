@@ -1,0 +1,49 @@
+# ## Анализ влияния солнечной активности на мир маргариток
+# Загружаем проект и необходимые пакеты
+using DrWatson
+@quickactivate "project"
+using Agents, DataFrames, Plots, CairoMakie, StatsBase
+
+# ## Подключение модели
+include(srcdir("daisyworld.jl"))
+
+# ## Определение функций для сбора данных
+# Функции для подсчёта чёрных и белых маргариток
+black(a) = a.breed == :black
+white(a) = a.breed == :white
+adata = [(black, count), (white, count)]
+
+# Функция для получения средней температуры
+temperature(model) = StatsBase.mean(model.temperature)
+mdata = [temperature, :solar_luminosity]
+
+# ## Запуск модели с изменяющейся солнечной активностью
+# Сценарий :ramp постепенно меняет солнечную светимость
+model = daisyworld(; solar_luminosity=1.0, scenario=:ramp)
+agent_df, model_df = run!(model, 1000; adata, mdata)
+
+# ## Визуализация результатов
+# Создаём трёхпанельный график: популяции, температура, светимость
+figure = CairoMakie.Figure(size=(600, 600))
+
+# Верхняя панель: динамика популяций
+ax1 = figure[1, 1] = Axis(figure, ylabel="daisy count")
+blackl = lines!(ax1, agent_df[!, :time], agent_df[!, :count_black], color=:red)
+whitel = lines!(ax1, agent_df[!, :time], agent_df[!, :count_white], color=:blue)
+figure[1, 2] = Legend(figure, [blackl, whitel], ["black", "white"])
+
+# Средняя панель: изменение температуры
+ax2 = figure[2, 1] = Axis(figure, ylabel="temperature")
+lines!(ax2, model_df[!, :time], model_df[!, :temperature], color=:red)
+
+# Нижняя панель: изменение солнечной светимости
+ax3 = figure[3, 1] = Axis(figure, xlabel="tick", ylabel="luminosity")
+lines!(ax3, model_df[!, :time], model_df[!, :solar_luminosity], color=:red)
+
+# Скрываем подписи на верхних осях для компактности
+for ax in (ax1, ax2)
+    ax.xticklabelsvisible = false
+end
+
+# Сохраняем результат
+save(plotsdir("daisy_luminosity.png"), figure)
