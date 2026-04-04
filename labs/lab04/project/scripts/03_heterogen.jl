@@ -1,0 +1,62 @@
+# # Исследование гетерогенности β между городами
+using DrWatson
+@quickactivate "project"
+using Agents, DataFrames, Plots
+
+include(srcdir("sir_model.jl"))
+
+# ## Параметры с разными β для городов
+params = Dict(
+    :Ns => [1000, 1000, 1000],
+    :β_und => [0.8, 0.4, 0.2],  # разные значения для городов
+    :β_det => [0.08, 0.04, 0.02],
+    :infection_period => 14,
+    :detection_time => 7,
+    :death_rate => 0.02,
+    :reinfection_probability => 0.1,
+    :Is => [1, 0, 0],  # инфекция начинается в городе с высокой β
+    :seed => 42,
+    :n_steps => 150,
+)
+
+# ## Инициализация и запуск модели
+model = initialize_sir(; params...)
+
+# Сбор данных по городам
+times = Int[]
+S_city = [[], [], []]
+I_city = [[], [], []]
+R_city = [[], [], []]
+
+for step = 1:params[:n_steps]
+    Agents.step!(model, 1)
+    push!(times, step)
+
+    for city in 1:3
+        city_agents = [a for a in allagents(model) if a.pos == city]
+        push!(S_city[city], count(a.status == :S for a in city_agents))
+        push!(I_city[city], count(a.status == :I for a in city_agents))
+        push!(R_city[city], count(a.status == :R for a in city_agents))
+    end
+end
+
+# ## Визуализация
+β_labels = ["β = 0.8", "β = 0.4", "β = 0.2"]
+
+for city in 1:3
+    p = plot(times, I_city[city], linewidth=2,
+             xlabel="Дни", ylabel="Инфицированные",
+             title="Город $city ($(β_labels[city]))")
+    savefig(plotsdir("sir_city_$(city)_dynamics.png"))
+end
+
+# ## Общая динамика
+plot(times, I_city[1], label="Город 1 (β=0.8)", linewidth=2)
+plot!(times, I_city[2], label="Город 2 (β=0.4)", linewidth=2)
+plot!(times, I_city[3], label="Город 3 (β=0.2)", linewidth=2)
+xlabel!("Дни")
+ylabel!("Инфицированные")
+title!("Динамика инфицированных по городам")
+savefig(plotsdir("sir_heterogeneity.png"))
+
+println("Графики сохранены в plots/sir_city_*_dynamics.png и plots/sir_heterogeneity.png")
