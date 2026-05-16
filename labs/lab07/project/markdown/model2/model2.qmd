@@ -1,0 +1,251 @@
+
+
+## Параметры модели
+
+В системе находятся $N = 10$ основных машин и $S = 3$ запасных. 
+Наработка до отказа — экспоненциальное распределение со средним $\lambda = 100$ часов.
+Время ремонта — экспоненциальное со средним $\mu = 1$ час. Работает $1$ ремонтник.
+
+```{julia}
+using DrWatson
+@quickactivate "project"
+
+using ResumableFunctions
+using ConcurrentSim
+using Distributions
+using Random
+using StableRNGs
+using DataFrames, CSV, Plots
+
+# Параметры
+RUNS = 5
+N = 10
+S = 3
+NUM_REPAIRMEN = 1
+LAMBDA = 100
+MU = 1
+
+rng = StableRNG(42)
+F = Exponential(LAMBDA)
+G = Exponential(MU)
+
+# Глобальные переменные мониторинга
+global working_count = N + S
+global busy_repairmen = 0
+global waiting_for_repair = 0
+working_machines = Tuple{Float64, Int}[]
+repair_load = Tuple{Float64, Int}[]
+queue_length = Tuple{Float64, Int}[]
+```
+
+## Поведение машины
+
+Каждая машина работает до отказа, после чего берётся запасная, 
+а сломавшаяся отправляется в очередь на ремонт. 
+После ремонта машина пополняет резерв.
+
+```{julia}
+@resumable function machine(
+    env::Environment,
+    repair_facility::Resource,
+    spares::Store{Process},
+)
+    while true
+        try
+            @yield timeout(env, Inf)
+        catch
+        end
+        @yield timeout(env, rand(rng, F))
+        
+        # Отказ: исправных стало меньше на 1
+        global working_count
+        working_count -= 1
+        push!(working_machines, (now(env), working_count))
+        
+        get_spare = take!(spares)
+        @yield get_spare | timeout(env)
+        if state(get_spare) != ConcurrentSim.idle
+            @yield interrupt(value(get_spare))
+            push!(working_machines, (now(env), working_count))
+        else
+            push!(working_machines, (now(env), working_count))
+            throw(StopSimulation("No more spares!"))
+        end
+        
+        # Постановка в очередь на ремонт
+        global waiting_for_repair
+        waiting_for_repair += 1
+        push!(queue_length, (now(env), waiting_for_repair))
+        
+        @yield request(repair_facility)
+        
+        global waiting_for_repair
+        waiting_for_repair -= 1
+        
+        # Ремонт
+        global busy_repairmen
+        busy_repairmen += 1
+        push!(repair_load, (now(env), busy_repairmen))
+        push!(queue_length, (now(env), waiting_for_repair))
+        
+        @yield timeout(env, rand(rng, G))
+        @yield unlock(repair_facility)
+        
+        global busy_repairmen
+        busy_repairmen -= 1
+        push!(repair_load, (now(env), busy_repairmen))
+        
+        @yield put!(spares, active_process(env))
+        
+        # Возврат в резерв
+        global working_count
+        working_count += 1
+        push!(working_machines, (now(env), working_count))
+    end
+end
+```
+
+## Запуск системы и симуляция
+
+```{julia}
+@resumable function start_sim(
+    env::Environment,
+    repair_facility::Resource,
+    spares::Store{Process},
+)
+    for i = 1:N
+        proc = @process machine(env, repair_facility, spares)
+        @yield interrupt(proc)
+    end
+    for i = 1:S
+        proc = @process machine(env, repair_facility, spares)
+        @yield put!(spares, proc)
+    end
+end
+
+function sim_repair(; n::Int = N, s::Int = S, r::Int = NUM_REPAIRMEN)
+    global working_machines = Tuple{Float64, Int}[]
+    global repair_load = Tuple{Float64, Int}[]
+    global queue_length = Tuple{Float64, Int}[]
+    global working_count = n + s
+    global busy_repairmen = 0
+    global waiting_for_repair = 0
+    
+    push!(working_machines, (0.0, n + s))
+    push!(repair_load, (0.0, 0))
+    push!(queue_length, (0.0, 0))
+    
+    sim = Simulation()
+    repair_facility = Resource(sim, r)
+    spares = Store{Process}(sim)
+    @process start_sim(sim, repair_facility, spares)
+    msg = run(sim)
+    stop_time = now(sim)
+    return stop_time, copy(working_machines), copy(repair_load), copy(queue_length)
+end
+```
+
+## Прогон для разного количества машин
+
+Исследуем влияние числа основных $N$ и запасных $S$ машин на время до отказа.
+
+```{julia}
+configs = [(N=10, S=3), (N=10, S=5), (N=15, S=3), (N=15, S=5)]
+results = DataFrame(N = Int[], S = Int[], crash_time = Float64[])
+
+for (n, s) in configs
+    times = Float64[]
+    for _ = 1:RUNS
+        t_sim, _, _, _ = sim_repair(n = n, s = s)
+        push!(times, t_sim)
+    end
+    push!(results, (n, s, mean(times)))
+    println("N=$n, S=$s: среднее время до отказа = $(round(mean(times), digits=1)) часов")
+end
+
+CSV.write(datadir("scan_results.csv"), results)
+```
+
+## Графики
+
+```{julia}
+t_sim, working_log, load_log, queue_log = sim_repair()
+plot_limit = min(100.0, t_sim)
+
+# График 1: Число исправных машин
+times_w = [x[1] for x in working_log]
+machines = [x[2] for x in working_log]
+idx_w = findall(t -> t <= plot_limit, times_w)
+
+p1 = plot(times_w[idx_w], machines[idx_w],
+          title = "Число исправных машин (первые $plot_limit часов)",
+          xlabel = "Время (часы)", ylabel = "Исправные машины",
+          label = "Исправные машины", lw = 2, marker = :circle, markersize = 3,
+          ylims = (N + S - 2, N + S + 1))
+hline!([N + S], linestyle = :dash, color = :blue, label = "N+S = $(N+S) (всего)")
+hline!([N], linestyle = :dash, color = :green, label = "N = $N (основные)")
+savefig(plotsdir("working_machines.png"))
+
+# График 2: Загрузка ремонтника
+times_l = [x[1] for x in load_log]
+loads = [x[2] for x in load_log]
+idx_l = findall(t -> t <= plot_limit, times_l)
+
+p2 = plot(times_l[idx_l], loads[idx_l],
+          title = "Загрузка ремонтника (первые $plot_limit часов)",
+          xlabel = "Время (часы)", ylabel = "Занятые ремонтники",
+          label = "Занят ремонтник", lw = 2, marker = :circle, markersize = 3,
+          ylims = (0, NUM_REPAIRMEN + 0.5))
+hline!([NUM_REPAIRMEN], linestyle = :dash, color = :red, label = "Всего ремонтников")
+savefig(plotsdir("repair_load.png"))
+
+# График 3: Длина очереди
+times_q = [x[1] for x in queue_log]
+queues = [x[2] for x in queue_log]
+idx_q = findall(t -> t <= plot_limit, times_q)
+
+p3 = plot(times_q[idx_q], queues[idx_q],
+          title = "Длина очереди на ремонт (первые $plot_limit часов)",
+          xlabel = "Время (часы)", ylabel = "Машин в очереди",
+          label = "Очередь", lw = 2, marker = :circle, markersize = 3,
+          ylims = (0, max(maximum(queues[idx_q]) + 0.5, 1)))
+savefig(plotsdir("queue_length.png"))
+
+# Средние показатели
+all_loads = [x[2] for x in load_log]
+all_queues = [x[2] for x in queue_log]
+avg_load = mean(all_loads)
+avg_queue = mean(all_queues)
+println("\nСредняя загрузка ремонтника: $(round(avg_load, digits=2)) из $NUM_REPAIRMEN")
+println("Средняя длина очереди: $(round(avg_queue, digits=2)) машин")
+```
+
+## Аналитическое сравнение
+
+Аналитическая модель — марковский процесс с состояниями $k = 0, \dots, S$ (число неисправных машин). 
+Стационарные вероятности: $\pi_k = \rho^k / \sum_{i=0}^S \rho^i$, где $\rho = \lambda_{sys} / \mu$.
+
+Среднее время до отказа: $T = 1 / (\lambda_{sys} \cdot \pi_S)$.
+
+```{julia}
+lambda_sys = N / LAMBDA
+mu_repair = 1 / MU
+r = lambda_sys / mu_repair
+
+sum_pi = sum([r^k for k = 0:S])
+pi_S = r^S / sum_pi
+failure_rate = lambda_sys * pi_S
+time_to_failure = 1 / failure_rate
+
+println("ρ = $(round(r, digits=3))")
+println("Аналитическое время до отказа: $(round(time_to_failure, digits=1)) часов")
+
+sim_times = Float64[]
+for _ = 1:RUNS
+    local t, _, _, _ = sim_repair()
+    push!(sim_times, t)
+end
+sim_avg = mean(sim_times)
+println("Симуляция (среднее): $(round(sim_avg, digits=1)) часов")
+println("Погрешность: $(round(abs(sim_avg - time_to_failure) / time_to_failure * 100, digits=1))%")
+```
